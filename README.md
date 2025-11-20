@@ -1,4 +1,4 @@
-# Sp## Features
+# Special Features
 
 - **Microphone Recording**: Record audio directly from your microphone in the browser
 - **File Upload**: Support for uploaded audio files via drag & drop or file picker
@@ -12,7 +12,9 @@
 - **Modern UI**: Beautiful, responsive React interface with recording controls
 - **Chunked Processing**: Handles long audio files efficiently
 - **Download & Copy**: Easy transcript export options
-- **Docker Ready**: Complete containerization for deploymentt Application
+- **Grammar Chatbot**: Interactive grammar correction and explanation tool
+- **Docker Ready**: Complete containerization for deployment
+- **Open Source**: Fully open source for customization and extension
 
 A complete speech-to-text solution using OpenAI Whisper for the backend and React for the frontend, designed for easy deployment.
 
