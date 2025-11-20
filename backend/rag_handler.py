@@ -11,16 +11,21 @@ import logging
 
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage
-
+from langchain_classic.memory import (  ConversationSummaryBufferMemory, 
+                                        ConversationBufferMemory,
+                                        CombinedMemory  )
+from langchain_core.chat_history import InMemoryChatMessageHistory
 try:
     import cohere
 except Exception:
     cohere = None
-
+from pydantic import SecretStr
 router = APIRouter()
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path="C:\\Users\\USER\\Documents\\Pronun-Analyzer-main\\backend\\.env")
+
+MEMORY_STORE = {}
 
 # logger for this module
 logger = logging.getLogger(__name__)
@@ -28,14 +33,39 @@ logging.basicConfig(level=logging.INFO)
 
 def get_chroma_client():
         # Use persist directory if provided, otherwise default local folder
-        persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-        try:
-                client = chromadb.Client(Settings(chroma_db_impl=os.getenv("CHROMA_IMPL", "chromadb.db.DuckDB"), persist_directory=persist_dir))
-        except Exception:
-                # Fallback to default client settings
-                client = chromadb.Client()
-        return client
+    persist_dir = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+    try:
+        client = chromadb.Client(Settings(chroma_db_impl=os.getenv("CHROMA_IMPL", "chromadb.db.DuckDB"), persist_directory=persist_dir))
+    except Exception:
+        # Fallback to default client settings
+        client = chromadb.Client()
+    return client
 
+def get_memory(llm, session_id):
+    if session_id not in MEMORY_STORE:
+        MEMORY_STORE[session_id] = InMemoryChatMessageHistory()
+
+    history = MEMORY_STORE[session_id]
+
+    summary = ConversationSummaryBufferMemory(
+        llm=llm,
+        chat_memory=history,
+        memory_key="summary",
+        return_messages=True,
+        input_key="input",
+        output_key="output"
+    )
+
+    buffer = ConversationBufferMemory(
+        chat_memory=history,
+        memory_key="recent",
+        return_messages=True,
+        input_key="input",
+        output_key="output"
+    )
+
+    memory = CombinedMemory(memories=[summary, buffer])
+    return memory
 
 @router.post("/chatbot/query")
 async def chatbot_query(payload: dict):
@@ -43,10 +73,12 @@ async def chatbot_query(payload: dict):
 
     Payload: {"query": "...", "max_results": 5}
     """
+    
+    session_id = payload.get("session_id", "default_session")
     query = payload.get("query")
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
-
+    
     max_results = int(payload.get("max_results", 5))
 
     # Initialize Chroma client and collection
@@ -72,22 +104,14 @@ async def chatbot_query(payload: dict):
     reranked_docs: List[str] = docs
     try:
         cohere_key = os.getenv('COHERE_API_KEY')
-        if cohere and cohere_key:
-            co = cohere.Client(cohere_key)
-            rr = co.rerank(model='rerank-english-v2', query=query, documents=docs)
-            # Prefer rr.ranks if available (indices sorted by relevance)
-            if hasattr(rr, 'ranks') and rr.ranks:
-                ranked_indices = list(rr.ranks)
+        if cohere_key:
+            
+            co = cohere.ClientV2(api_key=cohere_key)
+            rr = co.rerank(model='rerank-v3.5', query=query, documents=docs)
+    
+            ranked_indices = [r['index'] for r in rr.results if 'index' in r]
+            if ranked_indices:
                 reranked_docs = [docs[i] for i in ranked_indices if i < len(docs)]
-            elif hasattr(rr, 'results') and isinstance(rr.results, list):
-                # results may include 'index'
-                ranked = []
-                for r in rr.results:
-                    idx = r.get('index') if isinstance(r, dict) else None
-                    if idx is not None:
-                        ranked.append(idx)
-                if ranked:
-                    reranked_docs = [docs[i] for i in ranked if i < len(docs)]
     except Exception:
         # If rerank fails, continue with original chroma order
         reranked_docs = docs
@@ -125,7 +149,7 @@ async def chatbot_query(payload: dict):
         # Initialize LangChain ChatGroq
         try:
             llm = ChatGroq(
-                api_key=groq_api_key,
+                api_key=SecretStr(groq_api_key),
                 model=model_name,
                 temperature=0.2,
                 max_tokens=800
@@ -136,12 +160,30 @@ async def chatbot_query(payload: dict):
 
         # Call LLM with system and user messages
         try:
+            memory = get_memory(llm, session_id)
+            history_vars = memory.load_memory_variables({})
+            history_messages = []
+
+            if "summary" in history_vars:
+                history_messages.extend(history_vars["summary"])
+
+            if "recent" in history_vars:
+                history_messages.extend(history_vars["recent"])
+
+            
             messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt)
+                SystemMessage(content=system_prompt)
             ]
+            messages.extend(history_messages)
+            messages.append(HumanMessage(content=user_prompt))
+            
             response = llm.invoke(messages)
             answer = response.content if hasattr(response, 'content') else str(response).strip()
+            
+            memory.save_context(
+                    {"input": query},
+                    {"output": answer}
+            )
         except Exception as e:
             logger.exception('LangChain Groq call failed: %s', e)
             return JSONResponse({"error": "LLM request failed", "details": str(e)}, status_code=500, headers={"Access-Control-Allow-Origin": "*"})
@@ -149,7 +191,8 @@ async def chatbot_query(payload: dict):
         # Return answer and short list of sources
         return JSONResponse({
             "answer": answer,
-            "sources": [s[:800] for s in reranked_docs[:top_k]]
+            "sources": [s[:800] for s in reranked_docs[:top_k]],
+            "session_id": session_id
         }, headers={"Access-Control-Allow-Origin": "*"})
 
     except HTTPException:
