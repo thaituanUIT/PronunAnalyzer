@@ -773,8 +773,8 @@ class PronunciationAnalyzer:
             fluency_score = max(30, min(100, fluency_score))
             
             logger.info(f"Fluency calculation: words={word_count}, word_score={word_count_score}, "
-                       f"completeness={completeness_score}, distribution={distribution_score}, "
-                       f"final_score={fluency_score}")
+                        f"completeness={completeness_score}, distribution={distribution_score}, "
+                        f"final_score={fluency_score}")
             
             return round(fluency_score, 1)
             

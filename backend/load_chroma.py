@@ -73,7 +73,10 @@ def load_documents(paths: List[str]):
 
 
 def chunk_and_persist(docs, persist_directory: str, collection_name: str, chunk_size: int = 1000, chunk_overlap: int = 200, embeddings_model: str = 'sentence-transformers/all-MiniLM-L6-v2'):
-    """Split documents into chunks and persist to Chroma via LangChain's Chroma wrapper."""
+    """Split documents into chunks and persist to Chroma via LangChain's Chroma wrapper.
+    
+    Only adds new documents; skips documents that already exist in the collection.
+    """
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
         from langchain_chroma import Chroma
@@ -81,22 +84,50 @@ def chunk_and_persist(docs, persist_directory: str, collection_name: str, chunk_
     except Exception as e:
         raise RuntimeError("Please install langchain and huggingface embeddings provider (pip install langchain sentence-transformers transformers)") from e
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    logger.info(f"Splitting {len(docs)} documents into chunks (chunk_size={chunk_size}, overlap={chunk_overlap})")
-    split_docs = splitter.split_documents(docs)
-    logger.info(f"Created {len(split_docs)} chunks")
-
-    # Use HuggingFaceEmbeddings
-    # You can specify a model name, e.g., 'sentence-transformers/all-MiniLM-L6-v2' or another supported model
-    model_name = embeddings_model or 'sentence-transformers/all-MiniLM-L6-v2'
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
-
     persist_directory = os.path.abspath(persist_directory)
     os.makedirs(persist_directory, exist_ok=True)
 
-    logger.info(f"Persisting to Chroma directory: {persist_directory}, collection: {collection_name}")
-    chroma = Chroma.from_documents(split_docs, embedding=embeddings, persist_directory=persist_directory, collection_name=collection_name)
-    logger.info("Persistence complete")
+    # Use HuggingFaceEmbeddings
+    model_name = embeddings_model or 'sentence-transformers/all-MiniLM-L6-v2'
+    embeddings = HuggingFaceEmbeddings(model_name=model_name)
+
+    logger.info(f"Connecting to Chroma directory: {persist_directory}, collection: {collection_name}")
+    
+    # Load existing collection or create new one
+    chroma = Chroma(embedding_function=embeddings, persist_directory=persist_directory, collection_name=collection_name)
+    
+    # Get existing document sources to avoid re-indexing
+    try:
+        existing_metadata = chroma.get(include=['metadatas'])
+        existing_sources = set()
+        if existing_metadata and existing_metadata.get('metadatas'):
+            for metadata in existing_metadata['metadatas']:
+                if metadata and 'source' in metadata:
+                    existing_sources.add(metadata['source'])
+        logger.info(f"Found {len(existing_sources)} existing source documents in collection")
+    except Exception as e:
+        logger.warning(f"Could not retrieve existing documents: {e}. Proceeding with all documents.")
+        existing_sources = set()
+
+    # Filter out documents that already exist
+    new_docs = [doc for doc in docs if doc.metadata.get('source') not in existing_sources]
+    
+    if not new_docs:
+        logger.info("All documents already indexed. No new documents to add.")
+        return
+    
+    logger.info(f"Found {len(new_docs)} new documents to index (skipped {len(docs) - len(new_docs)} existing)")
+
+    # Split only new documents
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    logger.info(f"Splitting {len(new_docs)} new documents into chunks (chunk_size={chunk_size}, overlap={chunk_overlap})")
+    split_docs = splitter.split_documents(new_docs)
+    logger.info(f"Created {len(split_docs)} chunks from new documents")
+
+    # Add new documents to existing collection
+    logger.info(f"Adding {len(split_docs)} new chunks to Chroma collection")
+    chroma.add_documents(split_docs)
+    logger.info("Update complete")
 
 
 def main():
